@@ -18,6 +18,7 @@
 #include <boost/filesystem/path.hpp>
 #include <regex>
 #include <atomic>
+#include <functional>
 #include <boost\algorithm\string.hpp>
 #ifdef ACE_LOGGER_ENABLE_WEB_SOCKETS
 #include "../socketio/include/sio_client.h"
@@ -188,7 +189,6 @@ namespace AceLogger
 			m_version=_version;
 			m_platform = _platform;
 			m_path = _path;
-			std::cout << "initializing default log view " << std::endl;
 		}
 		virtual void show_err(const std::string &_text, int _count) {
 			std::cout << _text << std::endl;
@@ -375,7 +375,7 @@ namespace AceLogger
 			const std::string &_version,
 			const std::string &_platform,
 			const std::string &_path) {
-
+			
 			LogView::init(
 				_user,
 				_toolName,
@@ -468,11 +468,14 @@ namespace AceLogger
 		std::atomic<int> m_warningCount;
 		std::atomic<int> m_statusCount;
 
+		std::atomic<size_t> m_pending_logs;
+
 		MemoryCache<Message> m_message_cache;
 
+		BlockingQueue<Message> m_logMsgBuffer;
 	public:
 		
-		BlockingQueue<Message> m_logMsgBuffer;
+		
 		boost::thread_group m_loggingThread;
 		static Logger*& GetInstance(){
 			static Logger *instance = new Logger();
@@ -557,6 +560,15 @@ namespace AceLogger
 			return m_log_web.get_socket_commands_channel();
 		}
 
+		size_t get_pending_logs()const {
+			return m_pending_logs;
+		}
+
+		void add_log(Message *_msg) {
+			m_pending_logs.fetch_add(1);
+			m_logMsgBuffer.Insert(_msg);
+		}
+
 		void init() {
 			m_message_cache.fill_cache();
 			m_loggingThread.create_thread(boost::bind(
@@ -570,6 +582,7 @@ namespace AceLogger
 #ifdef linux
 			platform = "linux";
 #endif
+			std::cout << "initializing default log view " << std::endl;
 			m_default_view.init(get_username(),
 				get_toolname(),
 				get_starttime(),
@@ -577,6 +590,7 @@ namespace AceLogger
 				platform,
 				get_log_dir());
 
+			std::cout << "initializing file log view " << std::endl;
 			m_default_file_view.init(get_username(),
 				get_toolname(),
 				get_starttime(),
@@ -584,18 +598,21 @@ namespace AceLogger
 				platform,
 				get_log_dir());
 
+			std::cout << "initializing web log view " << std::endl;
 			m_log_web.init(get_username(),
 				get_toolname(),
 				get_starttime(),
 				get_version(),
 				platform,
 				get_log_dir());
+
+			m_pending_logs.store(0);
 		}
 		
 		void inline log_flush_internal(){
 			if (m_log_closed)
 				return;
-			while (m_logMsgBuffer.size() > 0){
+			while (m_logMsgBuffer.size() > 0|| get_pending_logs()>0){
 			}
 			try{
 				m_log_view->flush();
@@ -688,8 +705,10 @@ namespace AceLogger
 		void inline LogMessage_Internal() {
 			Message *message = nullptr;
 			while (m_logMsgBuffer.Remove(&message)) {
-				if (!message)
+				if (!message) {
+					m_pending_logs.fetch_sub(1);
 					continue;
+				}
 				std::string timeStamp = GetTimeString();
 				std::string msgType = "UNKNOWN";
 				if ((message)->p_messageType == MessageType::LOG_STATUS) {
@@ -748,6 +767,7 @@ namespace AceLogger
 					throw std::runtime_error("logging system encountered runtime error");
 				}
 				m_message_cache.add_to_cache(message);
+				m_pending_logs.fetch_sub(1);
 			}
 		};
 		
@@ -760,7 +780,7 @@ namespace AceLogger
 		msg->p_msg = _msg;
 		msg->p_log_type = _log_type;
 		msg->p_messageType = _type;
-		Logger::GetInstance()->m_logMsgBuffer.Insert(msg);
+		Logger::GetInstance()->add_log(msg);
 	};
 
 	void static LogErr(const std::string &_msg, 
@@ -786,23 +806,30 @@ namespace AceLogger
 		log_flush();
 	}
 
-	web_client& get_web_client() {
+	static web_client& get_web_client() {
 		return Logger::GetInstance()->get_web_client();
 	}
 
-	auto get_web_commands_channel()->decltype(Logger::GetInstance()->get_web_commands_channel()) {
+	static auto get_web_commands_channel()->decltype(Logger::GetInstance()->get_web_commands_channel()) {
 		return Logger::GetInstance()->get_web_commands_channel();
 	}
 	
 	int static GetErrorCount(){
 		return Logger::GetInstance()->get_error_count();
 	}
+
 	int static GetWarningCount(){
 		return Logger::GetInstance()->get_warn_count();
 	}
+
 	int static GetStatusCount(){
 		return Logger::GetInstance()->get_status_count();
 	}
+
+	static std::string GetToolName() {
+		return Logger::GetInstance()->get_toolname();
+	}
+
 	void static SetLogViewer(LogView *_viewer) {
 		if (!_viewer)
 			return;
